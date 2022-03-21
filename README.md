@@ -7,8 +7,11 @@ It can handle smallint, integer, bigint, real or double precision.
 Steps to install:
 
 Clone the repo
+
 Change the Directory to repo
+
 make
+
 make install
 
 CREATE EXTENSION min_to_max;
