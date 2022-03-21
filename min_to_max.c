@@ -8,6 +8,7 @@
 #include <common/int.h>
 #include <utils/builtins.h>
 #include <utils/typcache.h>
+#include <funcapi.h>
 
 
 PG_MODULE_MAGIC;
@@ -25,6 +26,114 @@ typedef union pgnum {
 	  float4 f4;
 	  float8 f8;
 	} pgnum; 
+	
+static text *
+	 array_to_text_internal(FunctionCallInfo fcinfo, ArrayType *v,
+							const char *fldsep, const char *null_string)
+	 {
+		 text       *result;
+		 int         nitems,
+					*dims,
+					 ndims;
+		 Oid         element_type;
+		 int         typlen;
+		 bool        typbyval;
+		 char        typalign;
+		 StringInfoData buf;
+		 bool        printed = false;
+		 char       *p;
+		 bits8      *bitmap;
+		 int         bitmask;
+		 int         i;
+		 ArrayMetaState *my_extra;
+	  
+		 ndims = ARR_NDIM(v);
+		 dims = ARR_DIMS(v);
+		 nitems = ArrayGetNItems(ndims, dims);
+	  
+		 if (nitems == 0)
+			 return cstring_to_text_with_len("", 0);
+	  
+		 element_type = ARR_ELEMTYPE(v);
+		 initStringInfo(&buf);
+	  
+	 
+		 my_extra = (ArrayMetaState *) fcinfo->flinfo->fn_extra;
+		 if (my_extra == NULL)
+		 {
+			 fcinfo->flinfo->fn_extra = MemoryContextAlloc(fcinfo->flinfo->fn_mcxt,
+														   sizeof(ArrayMetaState));
+			 my_extra = (ArrayMetaState *) fcinfo->flinfo->fn_extra;
+			 my_extra->element_type = ~element_type;
+		 }
+	  
+		 if (my_extra->element_type != element_type)
+		 {
+			 
+			 get_type_io_data(element_type, IOFunc_output,
+							  &my_extra->typlen, &my_extra->typbyval,
+							  &my_extra->typalign, &my_extra->typdelim,
+							  &my_extra->typioparam, &my_extra->typiofunc);
+			 fmgr_info_cxt(my_extra->typiofunc, &my_extra->proc,
+						   fcinfo->flinfo->fn_mcxt);
+			 my_extra->element_type = element_type;
+		 }
+		 typlen = my_extra->typlen;
+		 typbyval = my_extra->typbyval;
+		 typalign = my_extra->typalign;
+	  
+		 p = ARR_DATA_PTR(v);
+		 bitmap = ARR_NULLBITMAP(v);
+		 bitmask = 1;
+	  
+		 for (i = 0; i < nitems; i++)
+		 {
+			 Datum       itemvalue;
+			 char       *value;
+	  
+			 if (bitmap && (*bitmap & bitmask) == 0)
+			 {
+				 if (null_string != NULL)
+				 {
+					 if (printed)
+						 appendStringInfo(&buf, "%s%s", fldsep, null_string);
+					 else
+						 appendStringInfoString(&buf, null_string);
+					 printed = true;
+				 }
+			 }
+			 else
+			 {
+				 itemvalue = fetch_att(p, typbyval, typlen);
+	  
+				 value = OutputFunctionCall(&my_extra->proc, itemvalue);
+	  
+				 if (printed)
+					 appendStringInfo(&buf, "%s%s", fldsep, value);
+				 else
+					 appendStringInfoString(&buf, value);
+				 printed = true;
+	  
+				 p = att_addlength_pointer(p, typlen, p);
+				 p = (char *) att_align_nominal(p, typalign);
+			 }
+	  
+			 if (bitmap)
+			 {
+				 bitmask <<= 1;
+				 if (bitmask == 0x100)
+				 {
+					 bitmap++;
+					 bitmask = 1;
+				 }
+			 }
+		 }
+	  
+		 result = cstring_to_text_with_len(buf.data, buf.len);
+		 pfree(buf.data);
+	  
+		 return result;
+	 }
 	
 
 Datum
@@ -65,14 +174,17 @@ min_to_max_ffunc(PG_FUNCTION_ARGS)
 	{
 
 		ArrayBuildState *state;
-		int  dims[1],lbs[1],valsLength,i,len;
+		int  dims[1],lbs[1],valsLength,i;
 		ArrayType *vals;
 		Oid valsType;
 		int16 valsTypeWidth,retTypeWidth;
 		bool valsTypeByValue,retTypeByValue,resultIsNull = true,*valsNullFlags;
-		char valsTypeAlignmentCode,retTypeAlignmentCode,*res;
+		char valsTypeAlignmentCode,retTypeAlignmentCode;
 		Datum *valsContent,retContent[2];
 		pgnum minV, maxV;
+		bool retNulls[2] = {true, true};
+		ArrayType* retArray;
+		
 		
 
 		Assert(AggCheckCallContext(fcinfo, NULL));
@@ -109,7 +221,7 @@ min_to_max_ffunc(PG_FUNCTION_ARGS)
 
 		deconstruct_array(vals, valsType, valsTypeWidth, valsTypeByValue, valsTypeAlignmentCode,
 			&valsContent, &valsNullFlags, &valsLength);
-
+			
 
 		switch (valsType) {
 		case INT2OID:
@@ -200,18 +312,16 @@ min_to_max_ffunc(PG_FUNCTION_ARGS)
 		default:
 			ereport(ERROR, (errmsg("Supported Datatypes are SMALLINT, INTEGER, BIGINT, REAL, or DOUBLE PRECISION.")));
 		}
-
 		
-		len =((retContent[0]==0)?1:log10(retContent[0])+1)+((retContent[1]==0)?1:log10(retContent[1])+1)+2;
 
-		res = malloc(len);
+		 lbs[0] = 1;
+		  dims[0] = 2;
+		  if (!resultIsNull) {
+			retNulls[0] = false;
+			retNulls[1] = false;
+		  }
+		retArray = construct_md_array(retContent, retNulls, 1, dims, lbs, valsType, retTypeWidth, retTypeByValue, retTypeAlignmentCode);
 
-		sprintf(res, "%ld%s%ld", retContent[0],"->",retContent[1]);
-
-		PG_RETURN_TEXT_P(cstring_to_text(res));
-
-		free(res);
-
-		return 0;
-	
+		PG_RETURN_TEXT_P(array_to_text_internal(fcinfo, retArray, "->", NULL));
+			
 	}
