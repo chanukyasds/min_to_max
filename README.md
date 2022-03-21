@@ -2,6 +2,8 @@
 
 This Extension is Used to create an aggregate that process a column and returns the min and max values in a format of min->max.
 
+Supported Datatypes are SMALLINT, INTEGER, BIGINT, REAL, or DOUBLE PRECISION.
+
 Steps to install:
 
 Clone the repo
